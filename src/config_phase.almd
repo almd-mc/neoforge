@@ -3,7 +3,7 @@ import mc_protocol.varint
 import mc_protocol.types
 import mc_protocol.packet
 import mc_protocol.connection
-import self.`protocol`
+import self.payload
 
 // NeoForge CONFIG phase handler.
 // Auto-handles neoforge:register, c:version, c:register, config task ACKs.
