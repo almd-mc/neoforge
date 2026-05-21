@@ -3,10 +3,12 @@ import mc_protocol.varint
 import mc_protocol.types
 import mc_protocol.packet
 import mc_protocol.connection
-import self.payload
 
 // NeoForge CONFIG phase handler.
 // Auto-handles neoforge:register, c:version, c:register, config task ACKs.
+
+// ConnectionProtocol ordinal
+let PROTO_CONFIGURATION = 4
 
 // CONFIG state packet IDs (1.21.1 serverbound)
 let SB_CUSTOM_PAYLOAD = 0x02
@@ -23,20 +25,48 @@ let NO_ACK = [
   "c:version", "c:register",
 ]
 
-fn decode_channel(data: Bytes) -> { channel: String, payload: Bytes } = {
+// --- NeoForge payload encoding (inlined from payload.almd) ---
+
+local fn encode_component(id: String, version: String) -> Bytes =
+  bytes.concat(bytes.concat(types.encode_string(id), types.encode_string(version)), bytes.from_list([0x00, 0x00]))
+
+fn build_query_payload(channels: List[{ id: String, version: String }]) -> Bytes = {
+  if list.is_empty(channels) then
+    bytes.from_list([0x00])
+  else {
+    var buf = varint.encode(1)
+    buf = bytes.concat(buf, varint.encode(PROTO_CONFIGURATION))
+    buf = bytes.concat(buf, varint.encode(list.length(channels)))
+    for ch in channels {
+      buf = bytes.concat(buf, encode_component(ch.id, ch.version))
+    }
+    buf
+  }
+}
+
+fn build_version_response(version: Int) -> Bytes =
+  bytes.concat(varint.encode(1), varint.encode(version))
+
+fn build_register_response() -> Bytes =
+  bytes.concat(bytes.concat(varint.encode(1), types.encode_string("play")), varint.encode(0))
+
+// --- Helpers ---
+
+local fn decode_channel(data: Bytes) -> { channel: String, payload: Bytes } = {
   let r = varint.decode(data, 0)
   let channel_bytes = bytes.slice(data, r.size, r.size + r.value)
   let payload = bytes.slice(data, r.size + r.value, bytes.len(data))
   { channel: bytes.to_string(channel_bytes) ?? "", payload: payload }
 }
 
-fn encode_custom_payload(channel: String, payload: Bytes) -> Bytes =
+local fn encode_custom_payload(channel: String, payload: Bytes) -> Bytes =
   bytes.concat(types.encode_string(channel), payload)
 
-fn should_ack(channel: String) -> Bool =
+local fn should_ack(channel: String) -> Bool =
   not list.contains(NO_ACK, channel)
 
-// Handle a single CONFIG phase packet.
+// --- Packet handler ---
+
 effect fn handle_packet(
   conn: connection.Connection,
   pkt: packet.RawPacket,
@@ -44,17 +74,15 @@ effect fn handle_packet(
 ) -> Result[connection.Connection, String] = {
   match pkt.id {
     0x01 => {
-      // custom_payload
       let decoded = decode_channel(pkt.data)
       match decoded.channel {
         "minecraft:register" => {
-          // Mirror server's channels back
           let data = encode_custom_payload("minecraft:register", decoded.payload)
           connection.send(conn, SB_CUSTOM_PAYLOAD, data)
         },
         "neoforge:register" => {
-          let payload = `protocol`.build_query_payload(config_channels)
-          let data = encode_custom_payload("neoforge:register", payload)
+          let p = build_query_payload(config_channels)
+          let data = encode_custom_payload("neoforge:register", p)
           let c = connection.send(conn, SB_CUSTOM_PAYLOAD, data)!
           println("[NeoForge] register sent")
           ok(c)
@@ -68,15 +96,15 @@ effect fn handle_packet(
             if v.value > max_ver then { max_ver = v.value } else { () }
             off = off + v.size
           }
-          let payload = `protocol`.build_version_response(max_ver)
-          let data = encode_custom_payload("c:version", payload)
+          let p = build_version_response(max_ver)
+          let data = encode_custom_payload("c:version", p)
           let c = connection.send(conn, SB_CUSTOM_PAYLOAD, data)!
           println("[NeoForge] c:version -> ${int.to_string(max_ver)}")
           ok(c)
         },
         "c:register" => {
-          let payload = `protocol`.build_register_response()
-          let data = encode_custom_payload("c:register", payload)
+          let p = build_register_response()
+          let data = encode_custom_payload("c:register", p)
           let c = connection.send(conn, SB_CUSTOM_PAYLOAD, data)!
           println("[NeoForge] c:register -> empty play")
           ok(c)
@@ -94,23 +122,15 @@ effect fn handle_packet(
       }
     },
     0x03 => {
-      // finish_configuration
       let c = connection.send(conn, SB_FINISH, bytes.new(0))!
       ok(connection.set_state(c, connection.Play))
     },
-    0x04 => {
-      // keep_alive
-      connection.send(conn, SB_KEEP_ALIVE, pkt.data)
-    },
+    0x04 => connection.send(conn, SB_KEEP_ALIVE, pkt.data),
     0x05 => {
-      // ping
       let id = if bytes.len(pkt.data) >= 4 then types.decode_int(pkt.data, 0) else 0
       connection.send(conn, SB_PONG, types.encode_int(id))
     },
-    0x0E => {
-      // select_known_packs
-      connection.send(conn, SB_SELECT_KNOWN_PACKS, varint.encode(0))
-    },
+    0x0E => connection.send(conn, SB_SELECT_KNOWN_PACKS, varint.encode(0)),
     _ => ok(conn),
   }
 }

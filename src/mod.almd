@@ -6,7 +6,7 @@
 //   patcher      - JAR bytecode patcher
 //   deployer     - Docker deploy automation
 
-import self.payload
+
 import self.config_phase
 import self.patcher
 import self.deployer
