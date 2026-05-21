@@ -1,0 +1,133 @@
+import bytes
+import mc_protocol.varint
+import mc_protocol.types
+import mc_protocol.packet
+import mc_protocol.connection
+import self.`protocol`
+
+// NeoForge CONFIG phase handler.
+// Auto-handles neoforge:register, c:version, c:register, config task ACKs.
+
+// CONFIG state packet IDs (1.21.1 serverbound)
+let SB_CUSTOM_PAYLOAD = 0x02
+let SB_FINISH = 0x03
+let SB_KEEP_ALIVE = 0x04
+let SB_PONG = 0x05
+let SB_SELECT_KNOWN_PACKS = 0x07
+
+// Channels that must NOT be auto-ACK'd
+let NO_ACK = [
+  "minecraft:register", "minecraft:unregister", "minecraft:brand",
+  "neoforge:register", "neoforge:network",
+  "neoforge:modded_network_setup_failed", "neoforge:split",
+  "c:version", "c:register",
+]
+
+fn decode_channel(data: Bytes) -> { channel: String, payload: Bytes } = {
+  let r = varint.decode(data, 0)
+  let channel_bytes = bytes.slice(data, r.size, r.size + r.value)
+  let payload = bytes.slice(data, r.size + r.value, bytes.len(data))
+  { channel: bytes.to_string(channel_bytes) ?? "", payload: payload }
+}
+
+fn encode_custom_payload(channel: String, payload: Bytes) -> Bytes =
+  bytes.concat(types.encode_string(channel), payload)
+
+fn should_ack(channel: String) -> Bool =
+  not list.contains(NO_ACK, channel)
+
+// Handle a single CONFIG phase packet.
+effect fn handle_packet(
+  conn: connection.Connection,
+  pkt: packet.RawPacket,
+  config_channels: List[{ id: String, version: String }]
+) -> Result[connection.Connection, String] = {
+  match pkt.id {
+    0x01 => {
+      // custom_payload
+      let decoded = decode_channel(pkt.data)
+      match decoded.channel {
+        "minecraft:register" => {
+          // Mirror server's channels back
+          let data = encode_custom_payload("minecraft:register", decoded.payload)
+          connection.send(conn, SB_CUSTOM_PAYLOAD, data)
+        },
+        "neoforge:register" => {
+          let payload = `protocol`.build_query_payload(config_channels)
+          let data = encode_custom_payload("neoforge:register", payload)
+          let c = connection.send(conn, SB_CUSTOM_PAYLOAD, data)!
+          println("[NeoForge] register sent")
+          ok(c)
+        },
+        "c:version" => {
+          let r = varint.decode(decoded.payload, 0)
+          var max_ver = 0
+          var off = r.size
+          for i in 0..r.value {
+            let v = varint.decode(decoded.payload, off)
+            if v.value > max_ver then { max_ver = v.value } else { () }
+            off = off + v.size
+          }
+          let payload = `protocol`.build_version_response(max_ver)
+          let data = encode_custom_payload("c:version", payload)
+          let c = connection.send(conn, SB_CUSTOM_PAYLOAD, data)!
+          println("[NeoForge] c:version -> ${int.to_string(max_ver)}")
+          ok(c)
+        },
+        "c:register" => {
+          let payload = `protocol`.build_register_response()
+          let data = encode_custom_payload("c:register", payload)
+          let c = connection.send(conn, SB_CUSTOM_PAYLOAD, data)!
+          println("[NeoForge] c:register -> empty play")
+          ok(c)
+        },
+        _ => {
+          if should_ack(decoded.channel) then {
+            let data = encode_custom_payload(decoded.channel, bytes.from_list([0x00]))
+            let c = connection.send(conn, SB_CUSTOM_PAYLOAD, data)!
+            println("[NeoForge] ack: ${decoded.channel}")
+            ok(c)
+          } else {
+            ok(conn)
+          }
+        },
+      }
+    },
+    0x03 => {
+      // finish_configuration
+      let c = connection.send(conn, SB_FINISH, bytes.new(0))!
+      ok(connection.set_state(c, connection.Play))
+    },
+    0x04 => {
+      // keep_alive
+      connection.send(conn, SB_KEEP_ALIVE, pkt.data)
+    },
+    0x05 => {
+      // ping
+      let id = if bytes.len(pkt.data) >= 4 then types.decode_int(pkt.data, 0) else 0
+      connection.send(conn, SB_PONG, types.encode_int(id))
+    },
+    0x0E => {
+      // select_known_packs
+      connection.send(conn, SB_SELECT_KNOWN_PACKS, varint.encode(0))
+    },
+    _ => ok(conn),
+  }
+}
+
+// Run the full CONFIG phase loop until Play state.
+effect fn run(conn: connection.Connection, config_channels: List[{ id: String, version: String }]) -> Result[connection.Connection, String] = {
+  var c = conn
+  var in_config = true
+  while in_config {
+    let r = connection.recv(c)!
+    c = r.conn
+    c = handle_packet(c, r.packet, config_channels)!
+    match c.state {
+      connection.Play => { in_config = false },
+      _ => (),
+    }
+  }
+  println("[NeoForge] Configuration complete")
+  ok(c)
+}

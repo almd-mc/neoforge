@@ -1,0 +1,111 @@
+import bytes
+
+// NeoForge JAR bytecode patcher.
+// Patches NetworkRegistry and CheckExtensibleEnums to allow non-NeoForge clients.
+
+type Patch = {
+  label: String,
+  find: Bytes,
+  replace: Bytes,
+}
+
+type PatchResult = {
+  label: String,
+  count: Int,
+}
+
+let PATCH_NEOFORGE_NEGOTIATION: Patch = {
+  label: "NetworkRegistry.initializeNeoForgeConnection",
+  find: bytes.from_list([0xB6, 0x01, 0x72, 0x9A, 0x00, 0x45]),
+  replace: bytes.from_list([0x57, 0x04, 0x9A, 0x00, 0x46, 0x00]),
+}
+
+let PATCH_OTHER_NEGOTIATION: Patch = {
+  label: "NetworkRegistry.initializeOtherConnection",
+  find: bytes.from_list([0xB6, 0x01, 0x72, 0x9A, 0x00, 0x1E]),
+  replace: bytes.from_list([0x57, 0x04, 0x9A, 0x00, 0x1F, 0x00]),
+}
+
+let PATCH_EXTENSIBLE_ENUMS: Patch = {
+  label: "CheckExtensibleEnums.start",
+  find: bytes.from_list([0xB6, 0x00, 0x13, 0x99, 0x00, 0x10]),
+  replace: bytes.from_list([0x57, 0x04, 0x00, 0x99, 0x00, 0x10]),
+}
+
+fn apply_patch(data: Bytes, patch: Patch) -> { count: Int, data: Bytes } = {
+  let find_len = bytes.len(patch.find)
+  let data_len = bytes.len(data)
+  var result = bytes.slice(data, 0, data_len)
+  var count = 0
+  var i = 0
+  while i <= data_len - find_len {
+    let slice = bytes.slice(result, i, i + find_len)
+    if slice == patch.find then {
+      for j in 0..find_len {
+        result = bytes.set(result, i + j, bytes.read_u8(patch.replace, j))
+      }
+      count = count + 1
+      i = i + find_len
+    } else {
+      i = i + 1
+    }
+  }
+  { count: count, data: result }
+}
+
+fn patch_athrow_return(data: Bytes) -> { count: Int, data: Bytes } = {
+  let len = bytes.len(data)
+  var result = bytes.slice(data, 0, len)
+  var count = 0
+  var i = 0
+  while i < len - 1 {
+    if bytes.read_u8(result, i) == 0xBF and bytes.read_u8(result, i + 1) == 0xB1 then {
+      result = bytes.set(result, i, 0xB1)
+      count = count + 1
+    } else { () }
+    i = i + 1
+  }
+  { count: count, data: result }
+}
+
+fn patch_network_registry(data: Bytes) -> { results: List[PatchResult], data: Bytes } = {
+  let r1 = apply_patch(data, PATCH_NEOFORGE_NEGOTIATION)
+  let r2 = apply_patch(r1.data, PATCH_OTHER_NEGOTIATION)
+  let r3 = patch_athrow_return(r2.data)
+  {
+    results: [
+      { label: PATCH_NEOFORGE_NEGOTIATION.label, count: r1.count },
+      { label: PATCH_OTHER_NEGOTIATION.label, count: r2.count },
+      { label: "checkPacket athrow->return", count: r3.count },
+    ],
+    data: r3.data,
+  }
+}
+
+fn patch_check_extensible_enums(data: Bytes) -> { results: List[PatchResult], data: Bytes } = {
+  let r = apply_patch(data, PATCH_EXTENSIBLE_ENUMS)
+  { results: [{ label: PATCH_EXTENSIBLE_ENUMS.label, count: r.count }], data: r.data }
+}
+
+// --- Tests ---
+
+test "apply_patch - finds and replaces" {
+  let data = bytes.from_list([0x00, 0xB6, 0x01, 0x72, 0x9A, 0x00, 0x45, 0xFF])
+  let result = apply_patch(data, PATCH_NEOFORGE_NEGOTIATION)
+  assert_eq(result.count, 1)
+  assert_eq(bytes.read_u8(result.data, 1), 0x57)
+}
+
+test "apply_patch - no match" {
+  let data = bytes.from_list([0x00, 0x01, 0x02])
+  let result = apply_patch(data, PATCH_NEOFORGE_NEGOTIATION)
+  assert_eq(result.count, 0)
+}
+
+test "patch_athrow_return" {
+  let data = bytes.from_list([0x00, 0xBF, 0xB1, 0xFF, 0xBF, 0xB1])
+  let result = patch_athrow_return(data)
+  assert_eq(result.count, 2)
+  assert_eq(bytes.read_u8(result.data, 1), 0xB1)
+  assert_eq(bytes.read_u8(result.data, 4), 0xB1)
+}

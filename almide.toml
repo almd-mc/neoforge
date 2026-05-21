@@ -1,0 +1,7 @@
+[package]
+name = "neoforge"
+version = "0.1.0"
+
+[dependencies]
+aes = { git = "https://github.com/almide/aes" }
+mc-protocol = { git = "https://github.com/almd-mc/mc-protocol" }

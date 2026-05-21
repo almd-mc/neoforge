@@ -1,0 +1,69 @@
+import process
+import fs
+
+// Docker container operations for NeoForge patch deployment.
+
+type DeployConfig = {
+  container: String,
+  neoforge_version: String,
+}
+
+fn jar_path(config: DeployConfig) -> String =
+  "/data/libraries/net/neoforged/neoforge/${config.neoforge_version}/neoforge-${config.neoforge_version}-universal.jar"
+
+// Detect NeoForge version from container
+effect fn detect_version(container: String) -> Result[String, String] = {
+  let result = process.exec("docker", [
+    "exec", container, "bash", "-c",
+    "ls /data/libraries/net/neoforged/neoforge/ 2>/dev/null | head -1",
+  ])!
+  let version = string.trim(result)
+  guard string.len(version) > 0 else err("Could not detect NeoForge version")
+  ok(version)
+}
+
+// Extract JAR from container to local path
+effect fn extract_jar(config: DeployConfig, local_path: String) -> Result[Unit, String] = {
+  let remote = jar_path(config)
+  process.exec("docker", ["cp", "${config.container}:${remote}", local_path])!
+  ok(())
+}
+
+// Deploy patched JAR back to container
+effect fn deploy_jar(config: DeployConfig, local_path: String) -> Result[Unit, String] = {
+  let remote = jar_path(config)
+  // Create backup on first run
+  process.exec("docker", [
+    "exec", config.container, "bash", "-c",
+    "[ -f '${remote}.bak' ] || cp '${remote}' '${remote}.bak'",
+  ])!
+  // Copy patched JAR
+  process.exec("docker", ["cp", local_path, "${config.container}:${remote}"])!
+  ok(())
+}
+
+// Restart container and wait for healthy
+effect fn restart_and_wait(container: String, max_checks: Int) -> Result[String, String] = {
+  process.exec("docker", ["restart", container])!
+  var status = "unknown"
+  for i in 1..=max_checks {
+    process.exec("sleep", ["10"])!
+    let result = process.exec("docker", [
+      "inspect", container, "--format", "{{.State.Health.Status}}",
+    ])!
+    status = string.trim(result)
+    println("  ${int.to_string(i)}: ${status}")
+    guard status != "healthy" else ok("healthy")
+  }
+  err("Server did not become healthy (last: ${status})")
+}
+
+// Restore original JAR from backup
+effect fn restore_backup(config: DeployConfig) -> Result[Unit, String] = {
+  let remote = jar_path(config)
+  process.exec("docker", [
+    "exec", config.container, "bash", "-c",
+    "cp '${remote}.bak' '${remote}'",
+  ])!
+  ok(())
+}
