@@ -91,7 +91,7 @@ effect fn handle_packet(
           let r = varint.decode(decoded.payload, 0)
           var max_ver = 0
           var off = r.size
-          for i in 0..r.value {
+          for i in 0..<r.value {
             let v = varint.decode(decoded.payload, off)
             if v.value > max_ver then { max_ver = v.value } else { () }
             off = off + v.size
