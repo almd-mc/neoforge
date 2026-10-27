@@ -10,3 +10,6 @@ mc-protocol = { git = "https://github.com/almd-mc/mc-protocol" }
 # from an owner the root manifest trusts.
 [trust]
 owners = ["github.com/almd-mc"]
+
+[permissions]
+native = ["aes"]
