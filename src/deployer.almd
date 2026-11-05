@@ -46,7 +46,7 @@ effect fn deploy_jar(config: DeployConfig, local_path: String) -> Result[Unit, S
 effect fn restart_and_wait(container: String, max_checks: Int) -> Result[String, String] = {
   process.exec("docker", ["restart", container])!
   var status = "unknown"
-  for i in 1..=max_checks {
+  for i in 1...max_checks {
     process.exec("sleep", ["10"])!
     let result = process.exec("docker", [
       "inspect", container, "--format", "{{.State.Health.Status}}",
